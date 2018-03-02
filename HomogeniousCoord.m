@@ -17,7 +17,7 @@ else
     N = numel(t(1,:));
     M = zeros(4,4,N);
     
-    for i = 1:numel(N)
+    for i = 1:N
         M(:,:,i) = [[R(:,:,i), t(:,i)]; 0, 0, 0, 1];
     end
     

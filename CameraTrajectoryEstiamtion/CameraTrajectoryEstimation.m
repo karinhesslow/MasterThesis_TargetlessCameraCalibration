@@ -7,18 +7,19 @@
 %
 %% Read Input Images Sequence, OxTS data and Ground Truth
 clear; clc;
-addpath(genpath('Functions/'));
-addpath(genpath('Functions/helper'));
+
+addpath(genpath('helper'));
 
 % Select image set, ('synthetic','kitti0X','real')
 imgSet = 'kitti';
-
+imgSeq = 1:200;
 % Initilize camera structure
-Camera = InitCameraStructure(imgSet);
+Camera = InitCameraStructure(imgSet, imgSeq);
+N = length(Camera.index);
 
 %% Load OxTS data and ground truth
 seq = '00';
-[TrueCameraTrajectory, extrinsic] = LoadTrueTrajectories(seq);
+[TrueCameraTrajectory, extrinsic] = LoadTrueTrajectories(seq, imgSeq);
 
 % Create the camera parameter object using the camera intrisics for the
 % specified  image set
@@ -27,7 +28,8 @@ cameraParams = cameraParameters('IntrinsicMatrix',K');
 
 %% Reset
 clc;
-clearvars -except Camera cameraParams K TrueCameraTrajectory extrinsic
+clearvars -except Camera cameraParams K TrueCameraTrajectory extrinsic N xEstimatedStatesScaled_1 zEstimatedStatesScaled_1 yEstimatedStatesScaled_1 xEstimatedStatesScaled_2 zEstimatedStatesScaled_2 yEstimatedStatesScaled_2 xEstimatedStatesScaled_3 zEstimatedStatesScaled_3 yEstimatedStatesScaled_3
+
 %% Create a View Set Containing the First View of the Sequence
 % Create an empty viewSet object to manage the data associated with each view
 vSet = viewSet;
@@ -44,7 +46,7 @@ prevImg = undistortImage(Img1, cameraParams);
 prevPoints = detectSURFFeatures(prevImg, 'MetricThreshold', 500);
 
 % Select a subset of features, uniformaly distributed throughout the image.
-numPoints = 300;
+numPoints = 2000;
 prevPoints = selectUniform(prevPoints, numPoints, size(prevImg));
 
 % Extract features. Using 'Upright' features improves matching quality if
@@ -121,7 +123,7 @@ prevFeatures = currFeatures;
 prevPoints = currPoints;
 
 %% Bootstrap Estimating Camera Trajectory Using Global Bundle Adjustment
-for viewId = 3:15
+for viewId = 3:10
 % Read and display the next image
 Img = Camera.imageData(:,:,viewId)/256;     % Normalize image [0,1]
 step(player, Img)
@@ -144,7 +146,7 @@ inlierIndexPairs = indexPairs(inlierIdx,:);
 warningstate = warning('off','vision:ransac:maxTrialsReached');
 
 % Estimate the world camera pose for the current view
-[orient, loc] = estimateWorldCameraPose(imagePoints, worldPoints, cameraParams, 'Confidence', 99.99, 'MaxReprojectionError', 0.8);
+[orient, loc] = estimateWorldCameraPose(imagePoints, worldPoints, cameraParams, 'Confidence', 99.99, 'MaxReprojectionError', 0.1);
 
 % Restore the original warning state
 warning(warningstate)
@@ -179,7 +181,7 @@ prevPoints = currPoints;
 end
 
 %% Estiamte Remaining Camera Trajectory Using Windowed Bundle Adjustment
-for viewId = 16:numel(Camera.imageData(1,1,:))
+for viewId = 11:N
 % Read and display the next image
 Img = Camera.imageData(:,:,viewId)/256;     % Normalize image [0,1]
 step(player, Img)
@@ -191,7 +193,25 @@ currImg = undistortImage(Img, cameraParams);
 [currPoints, currFeatures, indexPairs] = helperDetectAndMatchFeatures(prevFeatures, currImg);
 
 % Eliminate ouliers from feaure matches
-inlierIdx = helperFindEpipolarInliers(prevPoints(indexPairs(:,1)), currPoints(indexPairs(:,2)), cameraParams);
+try
+   inlierIdx = helperFindEpipolarInliers(prevPoints(indexPairs(:,1)), currPoints(indexPairs(:,2)), cameraParams);
+catch
+    % Store the points matched between the previous and the current view
+    vSet = addView(vSet, viewId, 'Points', currPoints, 'Orientation', orient, 'Location', loc);
+    % Store the point matched between the previous and the current views
+    vSet = addConnection(vSet, viewId-1, viewId, 'Matches', inlierIndexPairs);
+    
+    helperUpdateCameraPlots(viewId, camEstimated, camActual, poses(vSet), TrueCameraTrajectory);
+    helperUpdateCameraTrajectories(viewId, trajectoryEstimated, trajectoryActual, poses(vSet), TrueCameraTrajectory)
+    
+    
+    % Update time step
+    prevImg = currImg;
+    prevFeatures = currFeatures;
+    prevPoints = currPoints;
+    continue
+end
+
 inlierIndexPairs = indexPairs(inlierIdx,:);
 
 % Triangulate points from the previous two views, and find the
@@ -202,7 +222,7 @@ inlierIndexPairs = indexPairs(inlierIdx,:);
 warningstate = warning('off','vision:ransac:maxTrialsReached');
 
 % Estimate the world camera pose for the current view
-[orient, loc] = estimateWorldCameraPose(imagePoints, worldPoints, cameraParams,'MaxNumTrials', 5000,'Confidence', 99.99, 'MaxReprojectionError', 1.0);
+[orient, loc] = estimateWorldCameraPose(imagePoints, worldPoints, cameraParams,'MaxNumTrials', 5000,'Confidence', 99.99, 'MaxReprojectionError', 0.1);
 % Restore the original warning state
 warning(warningstate)
 
@@ -228,10 +248,10 @@ if mod(viewId, 7) == 0
     % Exclude points and tracks with high reprojection errors
     idx = reprojErrors < 2;
     
-    [~, camPoses] = bundleAdjustment(xyzPoints(idx,:), tracks(idx), camPoses, cameraParams, ...
-        'FixedViewIDs', fixedIds, 'PointsUndistorted', true, 'AbsoluteTolerance', 1e-9, ...
-        'RelativeTolerance', 1e-9, 'Maxiterations', 300);
-    vSet = updateView(vSet, camPoses);
+   [~, camPoses] = bundleAdjustment(xyzPoints(idx,:), tracks(idx), camPoses, cameraParams, ...
+       'FixedViewIDs', fixedIds, 'PointsUndistorted', true, 'AbsoluteTolerance', 1e-9, ...
+       'RelativeTolerance', 1e-9, 'Maxiterations', 300);
+   vSet = updateView(vSet, camPoses);
      
 end
 
@@ -249,48 +269,130 @@ end
     prevPoints = currPoints;
 
 end
-%%
-HistogramOfMatches(vSet)
 
-%%
-for i = 1:515
-   states(i,:) = vSet.Views.Location{i}-vSet.Views.Location{1};
+%% States 
+
+orientationInit = vSet.Views.Orientation{1}';
+
+for i = 1:N
+   EstimatedStates(i,:) = vSet.Views.Location{i}-vSet.Views.Location{1};
    trueStates(i,:) = TrueCameraTrajectory.Location(i,:);
- end
-%% Scale Estimation
-for i = 1:514
-dStates(i,:) = states(i+1,:) - states(i,:); 
-dTrueStates(i,:) = trueStates(i+1,:) - trueStates(i,:);
+   orientation(:,:,i) =  vSet.Views.Orientation{i} * orientationInit;
 end
-xScale = dTrueStates(:,1)./dStates(:,1);
-zScale = dTrueStates(:,3)./dStates(:,3);
+
+%% Scale Estimation
+for i = 1:N-1
+diffEstimatedStates(i,:) = EstimatedStates(i+1,:) - EstimatedStates(i,:); 
+diffTrueStates(i,:) = trueStates(i+1,:) - trueStates(i,:);
+end
+xScale = diffTrueStates(:,1)./diffEstimatedStates(:,1);
+zScale = diffTrueStates(:,3)./diffEstimatedStates(:,3);
 xMean = mean(xScale); xMedian = median(xScale);
 zMean = mean(zScale); zMedian = median(zScale);
 
-%% Plot Scaling
+%% Scale Estimation test
 clf
-xMeanStates = zeros(1,515);
-xMedianStates = zeros(1,515);
-zMeanStates = zeros(1,515);
-zMedianStates = zeros(1,515);
-xTrueStates = zeros(1,515);
-zTrueStates = zeros(1,515);
 
-for i = 1:514
-   xMeanStates(i+1) = xMeanStates(i) + xMean*dStates(i,1);
-   zMeanStates(i+1) = zMeanStates(i) + zMean*dStates(i,3);
-   xMedianStates(i+1) = xMedianStates(i) + xMedian*dStates(i,1);
-   zMedianStates(i+1) = zMedianStates(i) + zMedian*dStates(i,3);
-   xTrueStates(i+1) = xTrueStates(i) + xScale(i)*dStates(i,1);
-   zTrueStates(i+1) = zTrueStates(i) + zScale(i)*dStates(i,3);
+s = zeros(1,N);
+counter = 0;
+for i = 2:N
+%     a(i) = abs(atan2((trueStates(i+1,1)-trueStates(i,1)),(trueStates(i+1,3)-trueStates(i,3))) - (atan2((trueStates(i,1)-trueStates(i-1,1)),(trueStates(i,3)-trueStates(i-1,3)))));
+%     if a(i) < 0.01 
+        x2y2_true(i) = sqrt(abs(((trueStates(i,1)-trueStates(i-1,1))^2) + ((trueStates(i,3)-trueStates(i-1,3))^2) + ((trueStates(i,2)-trueStates(i-1,2))^2)));
+        x2y2_estimated(i) = sqrt(abs(((EstimatedStates(i,1)-EstimatedStates(i-1,1))^2) + ((EstimatedStates(i,3)-EstimatedStates(i-1,3))^2) + ((EstimatedStates(i,2)-EstimatedStates(i-1,2))^2)));
+        s(i) = x2y2_true(i)/x2y2_estimated(i);
+        
 end
 
-plot(xMeanStates,zMeanStates,'-black')
+s2 = zeros(1,N);
+for i = 2:N-1 
+        x2y2_true2(i) = sqrt(abs(((trueStates(i,1)-trueStates(i-1,1))^2) + ((trueStates(i,3)-trueStates(i-1,3))^2)));
+        x2y2_estimated2(i) = sqrt(abs(((EstimatedStates(i,1)-EstimatedStates(i-1,1))^2) + ((EstimatedStates(i,3)-EstimatedStates(i-1,3))^2)));
+        s2(i) = x2y2_true2(i)/x2y2_estimated2(i); 
+end
+
+%% Estimate orientation
+
+xdiff = zeros(1,N);
+zdiff = zeros(1,N);
+
+for i = 1:N-1
+    orientationDiff(:,:,i) = vSet.Views.Orientation{i+1} - vSet.Views.Orientation{i};
+%     orientationDiffTrajectories(:,:,i) = orientation(i) - TrueCameraTrajectory.Orientation(:,:,i);
+    [euler(i,:)] = rotm2eul(orientationDiff(:,:,i));
+end
+for i = 3:N-2
+    if abs(euler(i,1)) > 3 && i > 1
+        s(i) = (s(i-5)+s(i-4)+s(i-3)+s(i-2)+s(i-1))/5;
+%         xdiff(i) = sign((trueStates(i+1,1) - trueStates(i,1)) * (trueStates(i+1,3) - trueStates(i,3))) * cos(euler(i,1)) * sqrt(abs((trueStates(i+1,1) - trueStates(i,1))^2 + (trueStates(i+1,3) - trueStates(i,3))^2));
+%         zdiff(i) = sign((trueStates(i+1,1) - trueStates(i,1)) * (trueStates(i+1,3) - trueStates(i,3))) * sin(euler(i,1)) * sqrt(abs((trueStates(i+1,1) - trueStates(i,1))^2 + (trueStates(i+1,3) - trueStates(i,3))^2));
+    end
+    if s(i) > 2*s(i-1)
+        s(i) = s(i-1);
+    end
+end
+
+%%
+
+% xMeanStates = zeros(1,N);
+% xMedianStates = zeros(1,N);
+% zMeanStates = zeros(1,N);
+% zMedianStates = zeros(1,N);
+xEstimatedStatesScaled = zeros(1,N);
+zEstimatedStatesScaled = zeros(1,N);
+yEstimatedStatesScaled = zeros(1,N);
+
+for i = 1:N-1
+%    xMeanStates(i+1) = xMeanStates(i) + xMean * diffEstimatedStates(i,1);
+%    zMeanStates(i+1) = zMeanStates(i) + zMean * diffEstimatedStates(i,3);
+%    xMedianStates(i+1) = xMedianStates(i) + xMedian * diffEstimatedStates(i,1);
+%    zMedianStates(i+1) = zMedianStates(i) + zMedian * diffEstimatedStates(i,3);
+   xEstimatedStatesScaled(i+1) = xEstimatedStatesScaled(i) + s(i) * diffEstimatedStates(i,1);
+   zEstimatedStatesScaled(i+1) = zEstimatedStatesScaled(i) + s(i) * diffEstimatedStates(i,3);
+   yEstimatedStatesScaled(i+1) = yEstimatedStatesScaled(i) + s(i) * diffEstimatedStates(i,2);
+end
+
+% 
+figure(1)
+% plot(xMeanStates,zMeanStates,'-black')
 hold on
 axis equal
 grid on
-plot(xMedianStates,zMedianStates,'-g')
-plot(xTrueStates, zTrueStates,'-r')
-plot(trueStates(:,1), trueStates(:,3),'--b')
+% plot(xMedianStates,zMedianStates,'-g')
+plot3(xEstimatedStatesScaled, zEstimatedStatesScaled, yEstimatedStatesScaled,'-k')
+% plot3(xEstimatedStatesScaled_1, zEstimatedStatesScaled_1, yEstimatedStatesScaled_1,'-k')
+% plot3(xEstimatedStatesScaled_2, zEstimatedStatesScaled_2, yEstimatedStatesScaled_2,'-green')
+% plot3(xEstimatedStatesScaled_3, zEstimatedStatesScaled_3, yEstimatedStatesScaled_3,'-r')
+% plot(xTrueStates_rot, zTrueStates_rot, '-k')
+plot3(trueStates(:,1), trueStates(:,3), trueStates(:,2),'--b')
+% plot(trueStates(300,1), trueStates(300,3),'*b')
+% plot(trueStates(200,1), trueStates(200,3),'*b')
+% plot(trueStates(100,1), trueStates(100,3),'*b')
+% plot(trueStates(420,1), trueStates(420,3),'*b')
+% plot(trueStates(360,1), trueStates(360,3),'*r')
 %hold on
 %plot(xScale.*states(2:end,1),zScale.*states(2:end,3),'.g')
+
+%% Save estimated trajectory
+
+for i = 1:N-1
+   xEstimatedStatesScaled_1(i) = xEstimatedStatesScaled(i) + s(i) * diffEstimatedStates(i,1);
+   zEstimatedStatesScaled_1(i) = zEstimatedStatesScaled(i) + s(i) * diffEstimatedStates(i,3);
+   yEstimatedStatesScaled_1(i) = yEstimatedStatesScaled(i) + s(i) * diffEstimatedStates(i,2);
+end
+
+%% 2
+
+for i = 1:N-1
+   xEstimatedStatesScaled_2(i) = xEstimatedStatesScaled(i) + s(i) * diffEstimatedStates(i,1);
+   zEstimatedStatesScaled_2(i) = zEstimatedStatesScaled(i) + s(i) * diffEstimatedStates(i,3);
+   yEstimatedStatesScaled_2(i) = yEstimatedStatesScaled(i) + s(i) * diffEstimatedStates(i,2);
+end
+
+%% 3
+
+for i = 1:N-1
+   xEstimatedStatesScaled_3(i) = xEstimatedStatesScaled(i) + s(i) * diffEstimatedStates(i,1);
+   zEstimatedStatesScaled_3(i) = zEstimatedStatesScaled(i) + s(i) * diffEstimatedStates(i,3);
+   yEstimatedStatesScaled_3(i) = yEstimatedStatesScaled(i) + s(i) * diffEstimatedStates(i,2);
+end
